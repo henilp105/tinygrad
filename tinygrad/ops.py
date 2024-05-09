@@ -76,7 +76,7 @@ class LazyOp:
   def dtype(self) -> DType:
     if self.op in BufferOps: return self.arg.dtype
     if self.op is UnaryOps.CAST: return self.arg[0]
-    if self.op in UnaryOps.BITCAST: return self.arg[1]
+    if self.op in UnaryOps.BITCAST: return self.arg[0]
     return dtypes.bool if self.op in {BinaryOps.CMPLT, BinaryOps.CMPEQ} else self.src[-1].dtype
 
   @functools.cached_property
