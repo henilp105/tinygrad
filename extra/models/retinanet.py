@@ -1,13 +1,9 @@
 import math
 from tinygrad.helpers import flatten, get_child
 import tinygrad.nn as nn
-<<<<<<< HEAD:models/retinanet.py
 from tinygrad.tensor import Tensor
 from models.resnet import ResNet
 from extra.utils import get_child
-=======
-from extra.models.resnet import ResNet
->>>>>>> master:extra/models/retinanet.py
 import numpy as np
 
 def nms(boxes, scores, thresh=0.5):
