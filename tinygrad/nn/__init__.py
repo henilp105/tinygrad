@@ -1,10 +1,11 @@
 import math
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, cast
 from tinygrad.tensor import Tensor
 from tinygrad.helpers import prod
+from tinygrad.nn import optim, state  # noqa: F401
 
 class BatchNorm2d:
-  def __init__(self, sz, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
+  def __init__(self, sz:int, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
     self.eps, self.track_running_stats, self.momentum = eps, track_running_stats, momentum
 
     if affine: self.weight, self.bias = Tensor.ones(sz), Tensor.zeros(sz)
@@ -19,14 +20,14 @@ class BatchNorm2d:
       # https://github.com/pytorch/pytorch/blob/c618dc13d2aa23625cb0d7ada694137532a4fa33/aten/src/ATen/native/cuda/Normalization.cuh
       # There's "online" algorithms that fix this, like https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_Online_algorithm
       batch_mean = x.mean(axis=(0,2,3))
-      y = (x - batch_mean.reshape(shape=[1, -1, 1, 1]))
+      y = (x - batch_mean.detach().reshape(shape=[1, -1, 1, 1]))  # d(var)/d(mean) = 0
       batch_var = (y*y).mean(axis=(0,2,3))
       batch_invstd = batch_var.add(self.eps).pow(-0.5)
 
       # NOTE: wow, this is done all throughout training in most PyTorch models
       if self.track_running_stats:
-        self.running_mean.assign((1 - self.momentum) * self.running_mean + self.momentum * batch_mean.detach())
-        self.running_var.assign((1 - self.momentum) * self.running_var + self.momentum * prod(y.shape)/(prod(y.shape) - y.shape[1]) * batch_var.detach() )
+        self.running_mean.assign((1-self.momentum) * self.running_mean + self.momentum * batch_mean.detach())
+        self.running_var.assign((1-self.momentum) * self.running_var + self.momentum * prod(y.shape)/(prod(y.shape)-y.shape[1]) * batch_var.detach())
         self.num_batches_tracked += 1
     else:
       batch_mean = self.running_mean
@@ -43,34 +44,39 @@ class Conv2d:
   def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True):
     self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)
     self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
-    self.weight = Tensor.kaiming_uniform(out_channels, in_channels//groups, *self.kernel_size, a=math.sqrt(5))
-    bound = 1 / math.sqrt(prod(self.weight.shape[1:]))
+    self.weight = self.initialize_weight(out_channels, in_channels, groups)
+    bound = 1 / math.sqrt(cast(int, prod(self.weight.shape[1:])))  # weight shape is always ints but mypy cannot tell
     self.bias = Tensor.uniform(out_channels, low=-bound, high=bound) if bias else None
 
-  def __call__(self, x):
+  def __call__(self, x:Tensor):
     return x.conv2d(self.weight, self.bias, padding=self.padding, stride=self.stride, dilation=self.dilation, groups=self.groups)
+
+  def initialize_weight(self, out_channels, in_channels, groups):
+    return Tensor.kaiming_uniform(out_channels, in_channels//groups, *self.kernel_size, a=math.sqrt(5))
 
 def ConvTranspose1d(in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0, dilation=1, groups=1, bias=True):
   return ConvTranspose2d(in_channels, out_channels, (kernel_size,), stride, padding, output_padding, dilation, groups, bias)
 
-class ConvTranspose2d:
+class ConvTranspose2d(Conv2d):
   def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0, dilation=1, groups=1, bias=True):
-    self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)
-    self.stride, self.padding, self.output_padding, self.dilation, self.groups = stride, padding, output_padding, dilation, groups
-    self.weight = Tensor.kaiming_uniform(in_channels, out_channels//groups, *self.kernel_size, a=math.sqrt(5))
-    bound = 1 / math.sqrt(prod(self.weight.shape[1:]))
-    self.bias = Tensor.uniform(out_channels, low=-bound, high=bound) if bias else None
+    super().__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
+    self.output_padding = output_padding
 
-  def __call__(self, x):
-    return x.conv_transpose2d(self.weight, self.bias, padding=self.padding, output_padding=self.output_padding, stride=self.stride, dilation=self.dilation, groups=self.groups)
+  def __call__(self, x:Tensor):
+    return x.conv_transpose2d(self.weight, self.bias, padding=self.padding, output_padding=self.output_padding, stride=self.stride,
+                              dilation=self.dilation, groups=self.groups)
+
+  def initialize_weight(self, out_channels, in_channels, groups):
+    return Tensor.kaiming_uniform(in_channels, out_channels//groups, *self.kernel_size, a=math.sqrt(5))
 
 class Linear:
   def __init__(self, in_features, out_features, bias=True):
+    # TODO: is this init good? torch inits to uniform(-1/sqrt(in_features), 1/sqrt(in_features))
     self.weight = Tensor.kaiming_uniform(out_features, in_features, a=math.sqrt(5))
-    bound = 1 / math.sqrt(self.weight.shape[1])
+    bound = 1 / math.sqrt(in_features)
     self.bias = Tensor.uniform(out_features, low=-bound, high=bound) if bias else None
 
-  def __call__(self, x):
+  def __call__(self, x:Tensor):
     return x.linear(self.weight.transpose(), self.bias)
 
 class GroupNorm:
@@ -116,9 +122,11 @@ class LayerNorm2d(LayerNorm):
 
 class Embedding:
   def __init__(self, vocab_size:int, embed_size:int):
-    self.vocab_size = vocab_size
-    self.weight = Tensor.glorot_uniform(vocab_size, embed_size)
+    self.vocab_sz, self.embed_sz, self.weight = vocab_size, embed_size, Tensor.glorot_uniform(vocab_size, embed_size)
 
   def __call__(self, idx:Tensor) -> Tensor:
-    vocab_counter = Tensor.arange(self.vocab_size, requires_grad=False).reshape(1, 1, self.vocab_size).expand(*idx.shape, self.vocab_size)
-    return (vocab_counter == idx.unsqueeze(2).expand(*idx.shape, self.vocab_size)) @ self.weight
+    if idx.numel() == 0: return Tensor.empty(idx.shape+(self.embed_sz,), device=self.weight.device)
+    arange_shp, weight_shp, big_shp = (1, 1, self.vocab_sz, 1), (1, 1, self.vocab_sz, self.embed_sz), idx.shape+(self.vocab_sz, self.embed_sz,)
+    if not hasattr(self, 'arange'): self.arange = Tensor.arange(self.vocab_sz, requires_grad=False, device=self.weight.device).reshape(arange_shp)
+    arange, idx, vals = self.arange.expand(big_shp), idx.reshape(idx.shape+(1, 1,)).expand(big_shp), self.weight.reshape(weight_shp).expand(big_shp)
+    return (arange == idx).mul(vals).sum(2)

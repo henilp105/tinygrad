@@ -1,12 +1,12 @@
 import os
+import sys
 import math
 import json
-from extra.utils import OSX
 import numpy as np
 from PIL import Image
 import pathlib
 import boto3, botocore
-from extra.utils import download_file
+from tinygrad.helpers import fetch
 from tqdm import tqdm
 import pandas as pd
 import concurrent.futures
@@ -127,7 +127,7 @@ def fetch_openimages(output_fn, set = "validation"):
   annotations = pd.read_csv(annotations_fn)
 
   classmap_fn = annotations_dir / MAP_CLASSES_URL.split('/')[-1]
-  download_file(MAP_CLASSES_URL, classmap_fn)
+  fetch(MAP_CLASSES_URL, classmap_fn)
   class_map = pd.read_csv(classmap_fn, names=["LabelName", "DisplayName"])
 
   image_list = get_image_list(class_map, annotations)

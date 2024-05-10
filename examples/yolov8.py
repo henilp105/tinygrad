@@ -2,14 +2,12 @@ from tinygrad.nn import Conv2d, BatchNorm2d
 from tinygrad.tensor import Tensor
 import numpy as np
 from itertools import chain
-from extra.utils import get_child, fetch, download_file
 from pathlib import Path
 import cv2
 from collections import defaultdict
-import os
-import time, io, sys
-from tinygrad.state import safe_load, load_state_dict
-
+import time, sys
+from tinygrad.helpers import fetch
+from tinygrad.nn.state import safe_load, load_state_dict
 
 #Model architecture from https://github.com/ultralytics/ultralytics/issues/189
 #The upsampling class has been taken from this pull request https://github.com/tinygrad/tinygrad/pull/784 by dc-dc-dc. Now 2(?) models use upsampling. (retinet and this)
@@ -93,7 +91,7 @@ def postprocess(preds, img, orig_imgs):
   print('copying to CPU now for post processing')
   #if you are on CPU, this causes an overflow runtime error. doesn't "seem" to make any difference in the predictions though.
   # TODO: make non_max_suppression in tinygrad - to make this faster
-  preds = preds.cpu().numpy() if isinstance(preds, Tensor) else preds
+  preds = preds.numpy() if isinstance(preds, Tensor) else preds
   preds = non_max_suppression(prediction=preds, conf_thres=0.25, iou_thres=0.7, agnostic=False, max_det=300)
   all_preds = []
   for i, pred in enumerate(preds):
@@ -245,7 +243,7 @@ class Upsample:
     tmp = x.reshape([b, c, -1] + [1] * _lens) * Tensor.ones(*[1, 1, 1] + [self.scale_factor] * _lens)
     return tmp.reshape(list(x.shape) + [self.scale_factor] * _lens).permute([0, 1] + list(chain.from_iterable([[y+2, y+2+_lens] for y in range(_lens)]))).reshape([b, c] + [x * self.scale_factor for x in x.shape[2:]])
 
-class Conv_Block():
+class Conv_Block:
   def __init__(self, c1, c2, kernel_size=1, stride=1, groups=1, dilation=1, padding=None):
     self.conv = Conv2d(c1,c2, kernel_size, stride, padding=autopad(kernel_size, padding, dilation), bias=False, groups=groups, dilation=dilation)
     self.bn = BatchNorm2d(c2, eps=0.001)
@@ -297,7 +295,7 @@ class DFL:
   def __init__(self, c1=16):
     self.conv = Conv2d(c1, 1, 1, bias=False)
     x = Tensor.arange(c1)
-    self.conv.weight.assign(x.reshape(1, c1, 1, 1))
+    self.conv.weight.replace(x.reshape(1, c1, 1, 1))
     self.c1 = c1
 
   def __call__(self, x):
@@ -398,13 +396,12 @@ if __name__ == '__main__':
   yolo_variant = sys.argv[2] if len(sys.argv) >= 3 else (print("No variant given, so choosing 'n' as the default. Yolov8 has different variants, you can choose from ['n', 's', 'm', 'l', 'x']") or 'n')
   print(f'running inference for YOLO version {yolo_variant}')
 
-  output_folder_path = './outputs_yolov8'
-  if not os.path.exists(output_folder_path):
-    os.makedirs(output_folder_path)
+  output_folder_path = Path('./outputs_yolov8')
+  output_folder_path.mkdir(parents=True, exist_ok=True)
   #absolute image path or URL
-  image_location = [np.frombuffer(io.BytesIO(fetch(img_path)).read(), np.uint8)]
+  image_location = [np.frombuffer(fetch(img_path).read_bytes(), np.uint8)]
   image = [cv2.imdecode(image_location[0], 1)]
-  out_paths = [os.path.join(output_folder_path, img_path.split("/")[-1].split('.')[0] + "_output" + '.' + img_path.split("/")[-1].split('.')[1])]
+  out_paths = [(output_folder_path / f"{Path(img_path).stem}_output{Path(img_path).suffix or '.png'}").as_posix()]
   if not isinstance(image[0], np.ndarray):
     print('Error in image loading. Check your image file.')
     sys.exit(1)
@@ -414,10 +411,7 @@ if __name__ == '__main__':
   depth, width, ratio = get_variant_multiples(yolo_variant)
   yolo_infer = YOLOv8(w=width, r=ratio, d=depth, num_classes=80)
 
-  weights_location = Path(__file__).parent.parent / "weights" / f'yolov8{yolo_variant}.safetensors'
-  download_file(f'https://gitlab.com/r3sist/yolov8_weights/-/raw/master/yolov8{yolo_variant}.safetensors', weights_location)
-
-  state_dict = safe_load(weights_location)
+  state_dict = safe_load(fetch(f'https://gitlab.com/r3sist/yolov8_weights/-/raw/master/yolov8{yolo_variant}.safetensors'))
   load_state_dict(yolo_infer, state_dict)
 
   st = time.time()
@@ -427,8 +421,7 @@ if __name__ == '__main__':
   post_predictions = postprocess(preds=predictions, img=pre_processed_image, orig_imgs=image)
 
   #v8 and v3 have same 80 class names for Object Detection
-  class_labels = fetch('https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names')
-  class_labels = class_labels.decode('utf-8').split('\n')
+  class_labels = fetch('https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names').read_text().split("\n")
 
   draw_bounding_boxes_and_save(orig_img_paths=image_location, output_img_paths=out_paths, all_predictions=post_predictions, class_labels=class_labels)
 

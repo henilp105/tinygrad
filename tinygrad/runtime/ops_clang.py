@@ -1,31 +1,29 @@
-import os, time, ctypes, hashlib, subprocess, platform, tempfile, functools
-from tinygrad.ops import Compiled
-from tinygrad.runtime.lib import RawMallocBuffer
-from tinygrad.codegen.linearizer import LinearizerOptions
-from tinygrad.renderer.cstyle import uops_to_cstyle, CStyleLanguage
+import ctypes, subprocess, pathlib, tempfile
+from tinygrad.device import Compiled, MallocAllocator, Compiler, CompilerOptions
+from tinygrad.helpers import cpu_time_execution
+from tinygrad.renderer.cstyle import ClangRenderer
 
-args = {
-  'Windows': {'cflags':'', 'ext':'dll', 'exp':'__declspec(dllexport)'},
-  'Linux': {'cflags':'-lm -fPIC --rtlib=compiler-rt ', 'ext':'so', 'exp':''},
-  'Darwin': {'cflags':'-lm -fPIC --rtlib=compiler-rt ', 'ext':'dylib', 'exp':''}
-}[platform.system()]
+class ClangCompiler(Compiler):
+  compiler_opts = CompilerOptions("CLANG", supports_float4=False, has_local=False)
+  def render(self, name:str, uops) -> str: return ClangRenderer(name, uops)
+  def compile(self, src:str) -> bytes:
+    # TODO: remove file write. sadly clang doesn't like the use of /dev/stdout here
+    with tempfile.NamedTemporaryFile(delete=True) as output_file:
+      subprocess.check_output(['clang', '-include', 'tgmath.h', '-shared', '-march=native', '-O2', '-Wall', '-Werror', '-x', 'c', '-fPIC', '-',
+                               '-o', str(output_file.name)], input=src.encode('utf-8'))
+      return pathlib.Path(output_file.name).read_bytes()
 
-CLANG_PROGRAM_HEADER = '#include <math.h>\n#define max(x,y) ((x>y)?x:y)\n#define int64 long\n#define half __fp16\n#define uchar unsigned char\n#define bool uchar\n'
 class ClangProgram:
-  def __init__(self, name:str, prg:str):
-    prg = CLANG_PROGRAM_HEADER + prg
-    # TODO: is there a way to not write this to disk?
-    fn = f"{tempfile.gettempdir()}/clang_{hashlib.md5(prg.encode('utf-8')).hexdigest()}.{args['ext']}"
-    if not os.path.exists(fn):
-      subprocess.check_output(args=('clang -shared -O2 -Wall -Werror -x c '+args['cflags']+' - -o '+fn+'.tmp').split(), input=prg.encode('utf-8'))
-      os.rename(fn+'.tmp', fn)
-    self.lib = ctypes.CDLL(fn)
-    self.fxn = self.lib[name]
+  def __init__(self, name:str, lib:bytes):
+    self.name, self.lib = name, lib
+    # write to disk so we can load it
+    with tempfile.NamedTemporaryFile(delete=True) as cached_file_path:
+      pathlib.Path(cached_file_path.name).write_bytes(lib)
+      self.fxn = ctypes.CDLL(str(cached_file_path.name))[name]
 
-  def __call__(self, global_size, local_size, *args, wait=False):
-    if wait: st = time.monotonic()
-    self.fxn(*[x._buf for x in args])
-    if wait: return time.monotonic()-st
+  def __call__(self, *bufs, vals=(), wait=False): return cpu_time_execution(lambda: self.fxn(*bufs, *vals), enable=wait)
 
-renderer = functools.partial(uops_to_cstyle, CStyleLanguage(kernel_prefix=args['exp'], buffer_suffix=" restrict"))
-ClangBuffer = Compiled(RawMallocBuffer, LinearizerOptions(supports_float4=False, has_local=False), renderer, ClangProgram)
+class ClangDevice(Compiled):
+  def __init__(self, device:str):
+    from tinygrad.runtime.graph.clang import ClangGraph
+    super().__init__(device, MallocAllocator, ClangCompiler("compile_clang"), ClangProgram, ClangGraph)

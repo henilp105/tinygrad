@@ -1,23 +1,18 @@
 #!/usr/bin/env python
 import numpy as np
 import unittest
-from tinygrad.lazy import LazyBuffer, Device
-from tinygrad.tensor import Tensor
-from tinygrad.shape.symbolic import Variable
-from tinygrad.ops import GlobalCounters
+from tinygrad import Tensor, Device, dtypes
+from tinygrad.lazy import LazyBuffer, ReduceOps, LoadOps
+from tinygrad.engine.schedule import create_schedule
 
 class TestLazyBuffer(unittest.TestCase):
-  def test_fromcpu_buffer_sharing(self):
-    a = np.arange(8)
-    assert LazyBuffer.fromCPU(a).realized._buf is a
-
   def test_fromcpu_shape_tracker(self):
     def helper(a: np.ndarray):
       print(a.shape, a.strides, a.flags.c_contiguous)
-      b = LazyBuffer.fromCPU(a).realize()
-      assert b.st.contiguous == a.flags.c_contiguous
+      b = Tensor(a).lazydata
+      #assert b.st.contiguous == a.flags.c_contiguous
       assert b.st.shape == a.shape
-      np.testing.assert_equal(a, b.toCPU())
+      np.testing.assert_equal(a, Tensor(b).numpy())
 
     for ndims in range(1, 4):
       a = np.random.randn(*(4,)*ndims).astype(np.float32)
@@ -45,52 +40,78 @@ class TestLazyBuffer(unittest.TestCase):
     z = Tensor([1, np.e]).numpy()
     np.testing.assert_allclose(y, z)
 
-  @unittest.skipUnless(Device.DEFAULT in ["METAL", "CUDA", "GPU"], "Only GPU backends supports cache")
-  def test_children_count(self):
-    a = Tensor.rand(8,8,8)
-    d1 = a.sum((0))
-    d2 = a.sum((0)).reshape(32,2)
-    assert len(d1.lazydata.op.src[0].children) == 1
-    in1 = d1.reshape(16,4)
-    d3 = in1.reshape(8,8)
-    assert len(d3.lazydata.op.src[0].children) == 2
+  def test_device_0_is_the_same_device(self):
+    a = Tensor([1, 2, 3], f"{Device.DEFAULT}")
+    b = Tensor([1, 2, 3], f"{Device.DEFAULT}:0")
+    assert a.device == b.device
 
-    GlobalCounters.cache = []
-    l = Tensor.rand(8,8)
-    r = Tensor.rand(8,8)
-    dd = d1 + l
-    dd.realize()
-    de = d3 + r
-    de.realize()
-    assert len(GlobalCounters.cache) == 3
-    assert GlobalCounters.cache[0][0].name.startswith("r_") # Reduce should not merged 2 times.
-    assert GlobalCounters.cache[1][0].name.startswith("E_")
-    assert GlobalCounters.cache[2][0].name.startswith("E_")
-    GlobalCounters.cache = None
+  def test_shrink_const_into_zero(self):
+    # regression test to make sure the shapetracker is preserved
+    a = Tensor.zeros(4,4,4).shrink((None, (0,0), None))
+    b = Tensor.zeros(4,1,4)
+    c = a.cat(b, dim=1)
+    np.testing.assert_allclose(c.numpy(), np.concatenate((a.numpy(), b.numpy()), axis=1))
 
-class TestVariableBuffer(unittest.TestCase):
-  def test_get_variable_buffers_no_variable(self):
-    t = Tensor.rand(2, 3)
-    assert t.lazydata.get_variable_buffers() == {}
+  def test_shrink_const_then_cast(self):
+    # regression test to make sure the shapetracker is preserved
+    a = Tensor.zeros(4,4,4).shrink((None, (0,0), None)).cast(dtypes.int32)
+    b = Tensor.zeros(4,1,4)
+    c = a.cat(b, dim=1)
+    np.testing.assert_allclose(c.numpy(), np.concatenate((a.numpy(), b.numpy()), axis=1))
 
-  def test_get_variable_buffers_one_variable(self):
-    v = Variable("v", 1, 10)
-    t = Tensor.rand(2, 3).reshape(v, 3)
-    buffers = t.lazydata.get_variable_buffers()
-    assert len(buffers) == 1 and buffers[v].realize().realized.toCPU() == 2
-    v = Variable("v", 1, 10)
-    t = Tensor.rand(2, 3).reshape(2, v)
-    buffers = t.lazydata.get_variable_buffers()
-    assert len(buffers) == 1 and buffers[v].realize().realized.toCPU() == 3
+  def test_const_dtype(self):
+    lb: LazyBuffer = Tensor([1], dtype=dtypes.int).lazydata
+    assert lb.const(1).base.arg == 1
+    assert type(lb.const(1).base.arg) is int
 
-  def test_get_variable_buffers_cat(self):
-    v1 = Variable("v1", 1, 10)
-    v2 = Variable("v2", 1, 10)
-    t1 = Tensor.rand(2, 3).reshape(v1, 3)
-    t2 = Tensor.rand(6, 3).reshape(v2, 3)
-    t = t1.cat(t2)
-    buffers = t.lazydata.get_variable_buffers()
-    assert len(buffers) == 2 and buffers[v1].realize().realized.toCPU() == 2 and buffers[v2].realize().realized.toCPU() == 6
+    lb: LazyBuffer = Tensor([1], dtype=dtypes.float).lazydata
+    assert lb.const(1).base.arg == 1.0
+    assert type(lb.const(1).base.arg) is float
+
+class TestReduceOp(unittest.TestCase):
+  def test_no_split_reduce_kernel(self):
+    a = Tensor.rand(4, 4).realize()
+    a = a.sum()
+    sched = create_schedule([a.lazydata])
+    assert len(sched) == 1
+    assert sched[0].ast[0].src[0].op is ReduceOps.SUM
+
+  def test_split_reduce_kernel_dim0(self):
+    a = Tensor.rand(256, 255).realize()
+    a = a.sum()
+    sched = create_schedule([a.lazydata])
+    assert len(sched) == 2
+    for s in sched:
+      assert s.ast[0].src[0].op is ReduceOps.SUM
+
+  def test_split_reduce_kernel_dim1(self):
+    a = Tensor.rand(255, 256).realize()
+    a = a.sum()
+    sched = create_schedule([a.lazydata])
+    assert len(sched) == 2
+    for s in sched:
+      assert s.ast[0].src[0].op is ReduceOps.SUM
+
+class TestView(unittest.TestCase):
+  def test_all_masked_out(self):
+    # start with non CONST LoadOps
+    a = Tensor.rand(10, 10)
+    assert a.lazydata.base.op is not LoadOps.CONST
+
+    # all masked out, degrades to const 0
+    b = a.pad(((0, 10), None))[10:]
+    assert b.shape == (10, 10)
+    assert b.lazydata.base.op is LoadOps.CONST and b.lazydata.base.arg == 0
+
+    # mask out dim = 1 works too
+    b = a.pad((None, (0, 10)))[:, 10:]
+    assert b.shape == (10, 10)
+    assert b.lazydata.base.op is LoadOps.CONST and b.lazydata.base.arg == 0
+
+    # partial masked out does not degrade into CONST
+    b = a.pad(((0, 5), None))[5:]
+    assert b.shape == (10, 10)
+    assert b.lazydata.base.op is not LoadOps.CONST
 
 if __name__ == "__main__":
   unittest.main()
