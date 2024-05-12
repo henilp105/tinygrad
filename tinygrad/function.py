@@ -59,6 +59,7 @@ class Sin(Function):
 
     return grad_output.e(BinaryOps.MUL, grad_input)
 
+
 # NOTE: maximum(x, 0) behaves differently where x=0
 class Relu(Function):
   def forward(self, x:LazyBuffer) -> LazyBuffer:
