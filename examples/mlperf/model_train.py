@@ -1,3 +1,8 @@
+<<<<<<< HEAD
+from tinygrad.tensor import Tensor
+from tinygrad.helpers import getenv, Context
+
+=======
 import os, time, math, functools
 from pathlib import Path
 from tqdm import tqdm
@@ -10,6 +15,7 @@ from tinygrad.nn.optim import LAMB, LARS, SGD, OptimizerGroup
 
 from extra.lr_scheduler import LRSchedulerGroup
 from examples.mlperf.helpers import get_training_state, load_training_state
+>>>>>>> master
 
 def train_resnet():
   from extra.models import resnet
@@ -341,9 +347,13 @@ def train_resnet():
         print(f"saving ckpt to {fn}")
         safe_save(get_training_state(model, optimizer_group, scheduler_group), fn)
 
-def train_retinanet():
-  # TODO: Retinanet
-  pass
+def train_retinanet(n_epochs=1, target_mAP=0.34, walltime_h=24):
+  from examples.mlperf.train_retinanet import RetinaNetTrainer
+  trainer = RetinaNetTrainer(debug=False)
+  for epoch in range(n_epochs):
+    trainer.train_one_epoch()
+  # reference torch implementation https://github.com/mlcommons/training/blob/master/object_detection/pytorch/maskrcnn_benchmark/modeling/rpn/retinanet
+
 
 def train_unet3d():
   # TODO: Unet3d
