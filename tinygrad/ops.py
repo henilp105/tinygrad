@@ -31,7 +31,7 @@ class LoadOps(Enum): EMPTY = auto(); CONST = auto(); COPY = auto(); CONTIGUOUS =
 Op = Union[UnaryOps, BinaryOps, ReduceOps, LoadOps, TernaryOps, BufferOps]
 
 # do not preserve f(0) = 0
-UNSAFE_PAD_OPS = {BinaryOps.DIV, UnaryOps.LOG2, UnaryOps.EXP2}
+UNSAFE_PAD_OPS = {BinaryOps.IDIV, UnaryOps.LOG2, UnaryOps.EXP2}
 
 @dataclass(frozen=True)
 class MemBuffer:
@@ -124,7 +124,7 @@ python_alu = {
   BinaryOps.MUL: operator.mul, BinaryOps.ADD: operator.add, BinaryOps.SUB: operator.sub, BinaryOps.XOR: operator.xor,
   BinaryOps.MAX: max, BinaryOps.CMPNE: operator.ne, BinaryOps.CMPLT: operator.lt,
   BinaryOps.MOD: lambda x,y: abs(int(x))%abs(int(y))*(1,-1)[x<0],
-  BinaryOps.DIV: lambda x,y: int(x/y) if isinstance(x, int) else (x/y if y != 0 else x*math.inf),
+  BinaryOps.IDIV: lambda x,y: int(x/y) if isinstance(x, int) else (x/y if y != 0 else x*math.inf),
   TernaryOps.WHERE: lambda x,y,z: y if x else z}
 
 truncate: Dict[DType, Callable] = {dtypes.bool: bool,
